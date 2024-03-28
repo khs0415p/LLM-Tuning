@@ -21,20 +21,18 @@ from transformers import (
 load_dotenv()
 HF_TOKEN = os.getenv('HF_TOKEN')
 IGNORE_INDEX = -100
-SOURCE_PROMPT = """<|im_start|>system\n{system_content}<|im_end|>\n<|im_start|>user\n{user_content}<|im_end|>\n"""
-TARGET_PROMPT = """<|im_start|>assistant\n{assistant_content}<|im_end|>\n"""
-
 
 @dataclass
 class ModelArguments:
-    model_name: Optional[str] = field(default="google/gemma-2b")
+    model_name: str
     device_map: str = field(default='auto')
+    model_dtype: Optional[torch.dtype] = field(default=torch.bfloat16)
 
 
 @dataclass
 class DataArguments:
-    train_data: str = field(default="YOUR_DATA.json")
-    valid_data: str = field(default="YOUR_DATA.json")
+    train_data: str = field(default="drug_profile_train.json")
+    valid_data: str = field(default="drug_profile_valid.json")
 
 
 @dataclass
@@ -43,17 +41,20 @@ class TrainingArguments(TrainingArguments):
     num_train_epochs: int = field(default=3)
     per_device_train_batch_size: int = field(default=1)
     optim: str = field(default="adamw_torch")
-    warmup_steps: int = field(default=2)
+    warmup_steps: int = field(default=100)
     lr_scheduler_type: Optional[str] = field(default='cosine')
-    fp16: bool = field(default=True)
+    fp16: bool = field(default=False)
     bf16: bool = field(default=False)
     learning_rate: float = field(default=1e-5)
     report_to: Optional[str] = field(default='none')
     logging_steps: int = field(default=10)
     gradient_accumulation_steps: int = field(default=1)
-    model_max_length: int = field(default=2048)
+    model_max_length: int = field(default=4096)
     max_grad_norm: float = field(default=1.0)
-    save_strategy: str = field(default="epoch")
+    save_strategy: str = field(default="steps")
+    save_steps: float = field(default=750)
+    gradient_checkpointing: bool = field(default=True)
+    report_to: Optional[str] = field(default='tensorboard')
 
 
 class SupervisedDataset(Dataset):
@@ -61,17 +62,21 @@ class SupervisedDataset(Dataset):
     데이터 형식
     [json, json, ...]
     """
-    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer) -> None:
+    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer, source_prompt: str, target_prompt: str) -> None:
         super(SupervisedDataset, self).__init__()
         with open(data_path, 'r') as f:
             data = json.load(f)
 
         self.tokenizer = tokenizer
-        self.sources = [SOURCE_PROMPT.format_map(chat_dict) for chat_dict in data]
-        self.targets = [TARGET_PROMPT.format_map(chat_dict) for chat_dict in data]
+        self.source_template = source_prompt
+        self.target_template = target_prompt
+
+        self.sources = [self.source_template.format_map(chat_dict) for chat_dict in data]
+        self.targets = [self.target_template.format_map(chat_dict) + self.tokenizer.eos_token for chat_dict in data]
+            
         logging.warning("Sample data")
-        logging.warning(f"source : {self.sources[0][:50]}...")
-        logging.warning(f"source : {self.targets[0][:50]}...")
+        logging.warning(f"source : {self.sources[0][:10]}...{self.sources[0][-10:]}")
+        logging.warning(f"target : {self.targets[0][:10]}...{self.targets[0][-10:]}")
 
         self.preprocess()
 
@@ -137,11 +142,28 @@ class DataCollatorForSupervisedDataset(object):
 def train():
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    training_args.output_dir = os.path.join(training_args.output_dir, model_args.model_name[:model_args.model_name.find('/')])
+    
+    if "gemma" in model_args.model_name:
+        source_prompt = """<|im_start|>system\n{system_content}<|im_end|>\n<|im_start|>user\n{user_content}<|im_end|>"""
+        target_prompt = """<|im_start|>assistant\n{assistant_content}<|im_end|>"""
+        if "it" in model_args.model_name:
+            source_prompt = """<start_of_turn>user\n{system_content}\n{user_content}<end_of_turn>"""
+            target_prompt = """<start_of_turn>model\n{assistant_content}<end_of_turn>"""
+    elif "llama" in model_args.model_name:
+        source_prompt = """[INST] <<SYS>>\n{system_content}\n<</SYS>>\n\n{user_content} [/INST]"""
+        target_prompt = """ {assistant_content} """
+    elif "mistral" in model_args.model_name:
+        source_prompt = """[INST]{system_content}\n{user_content} [\INST]"""
+        target_prompt = """{assistant_content}"""
+    else:
+        raise "Choose a model from gemma & llama2 & mistral"
     
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name,
         device_map = model_args.device_map,
         token=HF_TOKEN,
+        torch_dtype=model_args.model_dtype,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -151,13 +173,12 @@ def train():
         use_fast=False
     )
 
-    tokenizer.add_tokens(["<|im_start|>"])
-    tokenizer.add_special_tokens({"eos_token": "<|im_end|>"})
-
-    # resize model
-    model.resize_token_embeddings(len(tokenizer))
-
-    train_dataset = SupervisedDataset(data_path=data_args.train_data, tokenizer=tokenizer)
+    train_dataset = SupervisedDataset(
+        data_path=data_args.train_data,
+        tokenizer=tokenizer,
+        source_prompt=source_prompt,
+        target_prompt=target_prompt
+        )
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     trainer = Trainer(
         model=model,
@@ -170,6 +191,7 @@ def train():
 
     trainer.train()
     trainer.save_model()
+    trainer.save_state()
 
 
 if __name__ == "__main__":

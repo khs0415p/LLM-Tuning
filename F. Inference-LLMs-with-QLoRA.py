@@ -82,7 +82,7 @@ def test():
     # stop words
     stopping_criteria = get_stopping_criteria(tokenizer)
     # data
-    with open("drug_profile_valid.json", "r") as f:
+    with open("inference.json", "r") as f:
         test_data = json.load(f)
 
     with open(model_args.peft_model_name + '-test.txt', 'w') as f:

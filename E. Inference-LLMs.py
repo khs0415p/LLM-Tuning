@@ -50,7 +50,7 @@ def test():
     model_args.model_name = os.path.join(model_args.model_dir, model_args.model_name)
     model = AutoModelForCausalLM.from_pretrained(model_args.model_name, device_map='auto')
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name)
-    
+    tokenizer.pad_token = tokenizer.eos_token
     if "gemma" in model_args.model_name:
         source_prompt = """<|im_start|>system\n{system_content}<|im_end|>\n<|im_start|>user\n{user_content}<|im_end|>"""
         if "it" in model_args.model_name:
@@ -65,7 +65,7 @@ def test():
     # stop words
     stopping_criteria = get_stopping_criteria(tokenizer)
     # data
-    with open("drug_profile_valid.json", "r") as f:
+    with open("inference.json", "r") as f:
         test_data = json.load(f)
 
     with open(model_args.model_name + '-test.txt', 'w') as f:
@@ -74,7 +74,10 @@ def test():
             input_text = source_prompt.format_map(data)
             input_tensor = tokenizer(
                     input_text,
-                    return_tensors='pt'
+                    return_tensors='pt',
+                    max_length=3500,
+                    truncation=True,
+                    padding="longest"
                 ).to('cuda')
             
             start_len = input_tensor.input_ids.shape[-1]

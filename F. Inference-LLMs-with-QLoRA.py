@@ -107,8 +107,11 @@ def test():
             )
             
             result = tokenizer.decode(output[0][start_len:])
-            
-            # input / label 분리
+            result = tokenizer.decode(output[0][start_len:])
+            matched = re.match("<\|im_start\|>assistant\s+|<start_of_turn>model\s+", result)
+            if matched:
+                result = result[matched.span()[-1]:]
+                
             f.write("-" * 20 + "\n")
             f.write("### Label ###\n")
             f.write(data['assistant_content'] + '\n')
